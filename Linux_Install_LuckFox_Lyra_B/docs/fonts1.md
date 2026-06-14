@@ -1,6 +1,6 @@
 # Cambiar la fuente de consola en PicoCalc con Luckfox Lyra B y Linux
 
-Este documento explica cómo cambiar la fuente utilizada por la consola de Linux en una **PicoCalc** modificada con una **Luckfox Lyra B**.
+Este documento explica cómo cambiar la fuente utilizada por la consola de Linux en una **PicoCalc** modificada con una **[Luckfox Lyra B](https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/readme.md)**.
 
 El procedimiento está pensado para una instalación de Linux en modo consola, sin entorno gráfico, donde la PicoCalc se usa principalmente como una pequeña computadora portátil para terminal, edición de texto, programación y ejecución de scripts.
 
