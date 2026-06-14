@@ -38,6 +38,9 @@ Este documento explica cómo cambiar la fuente utilizada por la consola de Linux
 
 El procedimiento está pensado para una instalación de Linux en modo consola, sin entorno gráfico.
 
+* [Versión en español](https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/fonts1.md)
+* [English version](https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/fonts1_en.md)
+  
 <p align="center">
   <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/1.png" width="300"> 
 </p>
