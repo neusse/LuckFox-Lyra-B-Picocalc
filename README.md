@@ -4,6 +4,8 @@
 <span><img src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black"/></span>
 <span><img src="https://img.shields.io/badge/Ubuntu-24.04.2-E95420?style=for-the-badge&logo=ubuntu&logoColor=white"/></span>
 
+* [English version](https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/README_EN.md)
+
 Este repositorio reúne documentación práctica sobre el uso de **Linux en la PicoCalc**, especialmente a partir de la instalación de una **Luckfox Lyra B** como placa principal.
 
 <p align="center">
