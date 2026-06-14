@@ -100,6 +100,12 @@ Font: Terminus
 Font size: 12x6
 ```
 
+<p align="center">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/1.png" width="300">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/2.png" width="300">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/3.png" width="300">
+</p>
+
 En una pantalla pequeña como la de la PicoCalc, una fuente de 12 píxeles de alto por 6 píxeles de ancho puede permitir ver una buena cantidad de líneas y columnas.
 
 Después de finalizar el asistente, el sistema debería guardar la configuración.
