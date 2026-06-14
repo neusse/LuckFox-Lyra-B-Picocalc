@@ -97,6 +97,11 @@ Character set: Guess optimal character set
 Font: Terminus
 Font size: 12x6
 ```
+<p align="center">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/1.png" width="300">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/2.png" width="300">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/3.png" width="300">
+</p>
 
 On a small screen like the PicoCalc display, a font that is 12 pixels high by 6 pixels wide can allow a good number of lines and columns to be visible.
 
