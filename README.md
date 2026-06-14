@@ -32,6 +32,18 @@ Incluye preparación de la imagen, uso de `upgrade_tool`, entrada en modo `Maskr
 
 ---
 
+### Cambiar la fuente de consola
+
+Este documento explica cómo cambiar la fuente utilizada por la consola de Linux en una **PicoCalc** modificada con una **[Luckfox Lyra B](https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/readme.md)**.
+
+El procedimiento está pensado para una instalación de Linux en modo consola, sin entorno gráfico.
+
+<p align="center">
+  <img src="https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/blob/main/Linux_Install_LuckFox_Lyra_B/docs/img/1.png" width="300"> 
+</p>
+
+---
+
 ### PicoEdit
 
 **[PicoEdit](https://github.com/VintaBytes/LuckFox-Lyra-B-Picocalc/tree/main/Software/PicoEdit)** es un editor de código compacto para terminal, diseñado especialmente para pantallas pequeñas y dispositivos portátiles como la **Clockwork Pi PicoCalc**.
