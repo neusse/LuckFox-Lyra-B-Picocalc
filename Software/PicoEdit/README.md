@@ -23,6 +23,8 @@ El editor está pensado para funcionar bien en interfaces de aproximadamente **5
 ## Características principales
 
 * Editor de texto plano orientado a código Python.
+* Ajusta el área de edición al tamaño real de la terminal.
+* Usa toda la pantalla tanto por SSH como en la consola física.
 * Resaltado de sintaxis para Python.
 * Reconocimiento de palabras reservadas, funciones, cadenas, números y comentarios.
 * Menú superior simple con secciones `File`, `Edit`, `Search`, `Run` y `Help`.
@@ -34,6 +36,8 @@ El editor está pensado para funcionar bien en interfaces de aproximadamente **5
 * Ejecución directa del script Python actual desde el editor.
 * Indentación automática básica para bloques Python.
 * Barra inferior con posición actual del cursor y modo de edición.
+* Manejo más tolerante de teclas especiales en la consola Linux.
+* Selector opcional de fuente de consola cuando existen `picofont`, `setfont` o `loadfont`.
 * Interfaz completamente en inglés.
 * Implementado en un único archivo: `picoedit.py`.
 * Sin dependencias externas más allá de Python estándar y `curses`.
@@ -65,6 +69,22 @@ python3 picoedit.py mi_script.py
 ```
 
 Si el archivo existe, se carga en el editor. Si no existe, se puede crear y guardar desde PicoEdit.
+
+---
+
+## Nota sobre esta versión
+
+Esta versión fue probada en una **Clockwork Pi PicoCalc con Luckfox Lyra y Linux**.
+En ese entorno usa todo el tamaño disponible de la terminal, tanto por SSH como
+en la consola física del PicoCalc.
+
+También incluye manejo especial para algunas secuencias de teclado de consola
+Linux y una opción para cambiar fuentes de consola. Esas partes pueden depender
+del sistema, del teclado, de `TERM`, de `curses`, y de herramientas como
+`picofont`, `setfont` o `loadfont`.
+
+Antes de aplicar estos cambios a otros entornos, conviene revisar esas
+suposiciones con cuidado.
 
 ---
 

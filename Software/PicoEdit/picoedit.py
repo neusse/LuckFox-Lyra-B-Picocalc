@@ -12,14 +12,19 @@
 
 import builtins
 import curses
+import gzip
 import keyword
 import os
+import signal
+import shutil
 import subprocess
 import sys
 
 
 AN = 53
 AL = 26
+MIN_AN = 1
+MIN_AL = 3
 
 C_NORMAL = 1
 C_TITULO = 2
@@ -70,6 +75,29 @@ TECLA_ALT_FIND_NEXT = ord("n")
 
 MAX_UNDO = 10
 ESPERA_ALT_MS = 40
+ESPERA_CONSOLA_MS = 250
+MAX_FUENTES_PANEL = 200
+
+DIRECTORIOS_FUENTES_CONSOLA = (
+    "/usr/share/consolefonts",
+    "/usr/share/kbd/consolefonts",
+    "/lib/kbd/consolefonts",
+    "/usr/lib/kbd/consolefonts",
+)
+
+RUTAS_HERRAMIENTAS_CONSOLA = (
+    "/usr/sbin",
+    "/sbin",
+    "/usr/bin",
+    "/bin",
+)
+
+EXTENSIONES_FUENTES_CONSOLA = (
+    ".psf",
+    ".psf.gz",
+    ".psfu",
+    ".psfu.gz",
+)
 
 
 PY_KEYWORDS = set(keyword.kwlist)
@@ -114,41 +142,281 @@ def restaurar_paleta_anterior():
 # ------------------------------------------------------------
 # Inicializacion de curses
 # ------------------------------------------------------------
+def actualizar_tamano(stdscr):
+    global AN, AL
+
+    try:
+        alto, ancho = stdscr.getmaxyx()
+    except curses.error:
+        return
+
+    AN = max(MIN_AN, int(ancho))
+    AL = max(MIN_AL, int(alto))
+
+
+def cursor_visible(visible):
+    try:
+        curses.curs_set(1 if visible else 0)
+        return True
+    except curses.error:
+        return False
+
+
+def usar_colores_por_defecto():
+    try:
+        curses.use_default_colors()
+        return True
+    except curses.error:
+        return False
+
+
+def terminal_necesita_linux(term):
+    return not term or term in ("dumb", "unknown") or term.startswith("vt")
+
+
+def es_ruta_consola_fisica(ruta):
+    return ruta == "/dev/console" or ruta.startswith("/dev/tty")
+
+
+def detectar_consola_fisica():
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return False
+
+    try:
+        ruta = os.ttyname(sys.stdin.fileno())
+    except OSError:
+        ruta = ""
+
+    return es_ruta_consola_fisica(ruta)
+
+
+def preparar_terminal_consola():
+    if detectar_consola_fisica() and terminal_necesita_linux(os.environ.get("TERM")):
+        os.environ["TERM"] = "linux"
+
+
+def color_seguro(color, respaldo=0):
+    colores = getattr(curses, "COLORS", 0)
+
+    if colores <= 0:
+        return 0
+
+    if 0 <= color < colores:
+        return color
+
+    if 0 <= respaldo < colores:
+        return respaldo
+
+    return 0
+
+
+def init_pair_seguro(par, fg, bg):
+    if not curses.has_colors():
+        return False
+
+    if par >= curses.COLOR_PAIRS:
+        return False
+
+    try:
+        curses.init_pair(
+            par,
+            color_seguro(fg, curses.COLOR_WHITE),
+            color_seguro(bg, curses.COLOR_BLACK),
+        )
+        return True
+    except (curses.error, ValueError):
+        return False
+
+
+def color_necesita_brillo(color):
+    return color in (
+        C_ERROR,
+        C_ESTADO,
+        C_DESTACA,
+        C_NUMERO,
+        C_FUNCION,
+        C_VENTANA_BORDE,
+        C_VENTANA_DIR,
+        C_VENTANA_ESTADO,
+    )
+
+
+def decodificar_secuencia_escape(secuencia):
+    mapa = {
+        (ord("["), ord("A")): curses.KEY_UP,
+        (ord("["), ord("B")): curses.KEY_DOWN,
+        (ord("["), ord("C")): curses.KEY_RIGHT,
+        (ord("["), ord("D")): curses.KEY_LEFT,
+        (ord("["), ord("H")): curses.KEY_HOME,
+        (ord("["), ord("F")): curses.KEY_END,
+        (ord("O"), ord("A")): curses.KEY_UP,
+        (ord("O"), ord("B")): curses.KEY_DOWN,
+        (ord("O"), ord("C")): curses.KEY_RIGHT,
+        (ord("O"), ord("D")): curses.KEY_LEFT,
+        (ord("O"), ord("H")): curses.KEY_HOME,
+        (ord("O"), ord("F")): curses.KEY_END,
+        (ord("["), ord("1"), ord("~")): curses.KEY_HOME,
+        (ord("["), ord("2"), ord("~")): curses.KEY_IC,
+        (ord("["), ord("3"), ord("~")): curses.KEY_DC,
+        (ord("["), ord("4"), ord("~")): curses.KEY_END,
+        (ord("["), ord("5"), ord("~")): curses.KEY_PPAGE,
+        (ord("["), ord("6"), ord("~")): curses.KEY_NPAGE,
+    }
+
+    return mapa.get(tuple(secuencia), -1)
+
+
+def leer_secuencia_prefijada(stdscr, prefijo, espera_ms=ESPERA_ALT_MS):
+    stdscr.timeout(espera_ms)
+
+    try:
+        secuencia = [prefijo]
+
+        while len(secuencia) < 8:
+            parte = stdscr.getch()
+
+            if parte == -1:
+                break
+
+            secuencia.append(parte)
+
+            if 64 <= parte <= 126:
+                break
+
+        return decodificar_secuencia_escape(secuencia), secuencia
+    finally:
+        stdscr.timeout(-1)
+
+
+def leer_escape_terminal(stdscr, espera_ms=ESPERA_ALT_MS):
+    stdscr.timeout(espera_ms)
+
+    try:
+        siguiente = stdscr.getch()
+
+        if siguiente == -1:
+            return "escape", None
+
+        if siguiente in (ord("["), ord("O")):
+            valor, _secuencia = leer_secuencia_prefijada(stdscr, siguiente, espera_ms)
+            return "secuencia", valor
+
+        return "alt", siguiente
+    finally:
+        stdscr.timeout(-1)
+
+
+class TecladoSSH:
+    modo = "ssh"
+
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+
+    def leer_evento(self):
+        tecla = self.stdscr.getch()
+
+        if tecla != 27:
+            return "tecla", tecla
+
+        tipo, valor = leer_escape_terminal(self.stdscr)
+
+        if tipo == "escape":
+            return "tecla", 27
+
+        if tipo == "secuencia":
+            return "tecla", valor
+
+        return "alt", valor
+
+    def leer_tecla(self):
+        tipo, valor = self.leer_evento()
+
+        if tipo == "tecla":
+            return valor
+
+        if valor is not None:
+            curses.ungetch(valor)
+
+        return 27
+
+
+class TecladoConsola(TecladoSSH):
+    modo = "console"
+
+    def leer_evento(self):
+        tecla = self.stdscr.getch()
+
+        if tecla == 27:
+            tipo, valor = leer_escape_terminal(self.stdscr, ESPERA_CONSOLA_MS)
+
+            if tipo == "escape":
+                return "tecla", 27
+
+            if tipo == "secuencia":
+                return "tecla", valor
+
+            return "alt", valor
+
+        # PicoCalc console can drop the leading ESC and deliver [D, [C, [4~, etc.
+        if tecla in (ord("["), ord("O")):
+            valor, secuencia = leer_secuencia_prefijada(self.stdscr, tecla, ESPERA_CONSOLA_MS)
+
+            if valor != -1:
+                return "tecla", valor
+
+            for parte in reversed(secuencia[1:]):
+                curses.ungetch(parte)
+
+        return "tecla", tecla
+
+
+def crear_teclado(stdscr):
+    if detectar_consola_fisica():
+        return TecladoConsola(stdscr)
+
+    return TecladoSSH(stdscr)
+
+
+def leer_tecla_terminal(stdscr):
+    return TecladoSSH(stdscr).leer_tecla()
+
+
 def iniciar_curses(stdscr):
-    curses.curs_set(0)
     curses.noecho()
     curses.cbreak()
     stdscr.keypad(True)
     stdscr.nodelay(False)
+    actualizar_tamano(stdscr)
+    cursor_visible(False)
 
     curses.start_color()
-    curses.use_default_colors()
+    usar_colores_por_defecto()
     guardar_paleta_actual()
 
     # Editor principal
-    curses.init_pair(C_NORMAL, curses.COLOR_WHITE, curses.COLOR_BLACK)
-    curses.init_pair(C_TITULO, curses.COLOR_BLACK, curses.COLOR_WHITE)
-    curses.init_pair(C_RESALTA, curses.COLOR_BLUE, curses.COLOR_WHITE)
-    curses.init_pair(C_ERROR, curses.COLOR_RED, curses.COLOR_BLACK)
-    curses.init_pair(C_ESTADO, curses.COLOR_YELLOW, curses.COLOR_BLUE)
-    curses.init_pair(C_RESULT, curses.COLOR_WHITE, curses.COLOR_BLUE)
-    curses.init_pair(C_DESTACA, curses.COLOR_YELLOW, curses.COLOR_BLUE)
-    curses.init_pair(C_CARPETA, curses.COLOR_CYAN, curses.COLOR_BLUE)
+    init_pair_seguro(C_NORMAL, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    init_pair_seguro(C_TITULO, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    init_pair_seguro(C_RESALTA, curses.COLOR_BLUE, curses.COLOR_WHITE)
+    init_pair_seguro(C_ERROR, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    init_pair_seguro(C_ESTADO, curses.COLOR_YELLOW, curses.COLOR_BLUE)
+    init_pair_seguro(C_RESULT, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    init_pair_seguro(C_DESTACA, curses.COLOR_YELLOW, curses.COLOR_BLUE)
+    init_pair_seguro(C_CARPETA, curses.COLOR_CYAN, curses.COLOR_BLUE)
 
     # Sintaxis Python.
-    curses.init_pair(C_KEYWORD, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-    curses.init_pair(C_NUMERO, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-    curses.init_pair(C_STRING, curses.COLOR_GREEN, curses.COLOR_BLACK)
-    curses.init_pair(C_COMENTARIO, curses.COLOR_WHITE, curses.COLOR_BLACK)
-    curses.init_pair(C_VARIABLE, curses.COLOR_WHITE, curses.COLOR_BLACK)
-    curses.init_pair(C_FUNCION, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    init_pair_seguro(C_KEYWORD, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    init_pair_seguro(C_NUMERO, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    init_pair_seguro(C_STRING, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    init_pair_seguro(C_COMENTARIO, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    init_pair_seguro(C_VARIABLE, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    init_pair_seguro(C_FUNCION, curses.COLOR_YELLOW, curses.COLOR_BLACK)
 
     # Ventanas flotantes
-    curses.init_pair(C_VENTANA, curses.COLOR_WHITE, curses.COLOR_BLACK)
-    curses.init_pair(C_VENTANA_BORDE, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-    curses.init_pair(C_VENTANA_SEL, curses.COLOR_BLACK, curses.COLOR_WHITE)
-    curses.init_pair(C_VENTANA_DIR, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-    curses.init_pair(C_VENTANA_ESTADO, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    init_pair_seguro(C_VENTANA, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    init_pair_seguro(C_VENTANA_BORDE, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    init_pair_seguro(C_VENTANA_SEL, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    init_pair_seguro(C_VENTANA_DIR, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    init_pair_seguro(C_VENTANA_ESTADO, curses.COLOR_YELLOW, curses.COLOR_BLACK)
 
 
 # ------------------------------------------------------------
@@ -161,7 +429,12 @@ def escribir(stdscr, x, y, texto, color=C_NORMAL):
         return
 
     try:
-        stdscr.addstr(y, x, str(texto)[:AN - x], curses.color_pair(color))
+        attr = curses.color_pair(color)
+
+        if color_necesita_brillo(color):
+            attr = attr | curses.A_BOLD
+
+        stdscr.addstr(y, x, str(texto)[:AN - x], attr)
     except curses.error:
         pass
 
@@ -175,8 +448,8 @@ def escribir_color(stdscr, x, y, char, color=C_NORMAL):
     try:
         attr = curses.color_pair(color)
 
-        if color == C_COMENTARIO:
-            attr = attr | curses.A_DIM
+        if color_necesita_brillo(color):
+            attr = attr | curses.A_BOLD
 
         stdscr.addstr(y, x, char, attr)
     except curses.error:
@@ -190,6 +463,9 @@ def escribir_attr(stdscr, x, y, texto, color=C_NORMAL, attr=0):
         return
 
     try:
+        if color_necesita_brillo(color):
+            attr = attr | curses.A_BOLD
+
         stdscr.addstr(y, x, str(texto)[:AN - x], curses.color_pair(color) | attr)
     except curses.error:
         pass
@@ -210,6 +486,150 @@ def normalizar_ruta(ruta):
     return os.path.abspath(os.path.expanduser(ruta))
 
 
+def es_fuente_consola(ruta):
+    nombre = ruta.lower()
+    return any(nombre.endswith(ext) for ext in EXTENSIONES_FUENTES_CONSOLA)
+
+
+def nombre_fuente_consola(ruta):
+    nombre = os.path.basename(ruta)
+
+    for ext in sorted(EXTENSIONES_FUENTES_CONSOLA, key=len, reverse=True):
+        if nombre.lower().endswith(ext):
+            return nombre[:-len(ext)]
+
+    return nombre
+
+
+def listar_fuentes_consola(directorios=DIRECTORIOS_FUENTES_CONSOLA):
+    fuentes = []
+    vistos = set()
+
+    for directorio in directorios:
+        if not os.path.isdir(directorio):
+            continue
+
+        try:
+            nombres = os.listdir(directorio)
+        except OSError:
+            continue
+
+        for nombre in nombres:
+            ruta = os.path.join(directorio, nombre)
+
+            if not os.path.isfile(ruta) or not es_fuente_consola(ruta):
+                continue
+
+            real = os.path.abspath(ruta)
+
+            if real in vistos:
+                continue
+
+            vistos.add(real)
+            fuentes.append({
+                "nombre": nombre_fuente_consola(real),
+                "ruta": real,
+            })
+
+    fuentes.sort(key=lambda item: item["nombre"].lower())
+    return fuentes[:MAX_FUENTES_PANEL]
+
+
+def buscar_herramienta_consola(nombre):
+    ruta = shutil.which(nombre)
+
+    if ruta:
+        return ruta
+
+    for directorio in RUTAS_HERRAMIENTAS_CONSOLA:
+        ruta = os.path.join(directorio, nombre)
+
+        if os.path.isfile(ruta) and os.access(ruta, os.X_OK):
+            return ruta
+
+    return None
+
+
+def cargador_fuente_consola_disponible():
+    picofont = buscar_herramienta_consola("picofont")
+
+    if os.geteuid() != 0 and picofont is not None:
+        return "picofont", picofont
+
+    setfont = buscar_herramienta_consola("setfont")
+
+    if setfont is not None:
+        return "setfont", setfont
+
+    loadfont = buscar_herramienta_consola("loadfont")
+
+    if loadfont is not None:
+        return "loadfont", loadfont
+
+    return None
+
+
+def leer_bytes_fuente_consola(ruta):
+    if ruta.lower().endswith(".gz"):
+        with gzip.open(ruta, "rb") as archivo:
+            return archivo.read()
+
+    with open(ruta, "rb") as archivo:
+        return archivo.read()
+
+
+def alto_fuente_terminus(nombre):
+    base = nombre.lower()
+
+    for sufijo in ("b", "n"):
+        if base.endswith(sufijo):
+            base = base[:-1]
+            break
+
+    digitos = ""
+
+    for ch in reversed(base):
+        if not ch.isdigit():
+            break
+        digitos = ch + digitos
+
+    return int(digitos) if digitos else None
+
+
+def tamano_terminal_para_fuente(nombre):
+    nombre_base = nombre.lower()
+
+    if nombre_base == "kernel-6x8":
+        return 40, 53
+
+    if nombre_base.startswith("ter-v12"):
+        return 26, 53
+
+    alto_fuente = alto_fuente_terminus(nombre)
+
+    if not alto_fuente:
+        return None
+
+    return max(1, 320 // alto_fuente), 40
+
+
+def eleccion_picofont_para_fuente(nombre):
+    nombre_base = nombre.lower()
+
+    if nombre_base == "kernel-6x8":
+        return "original"
+
+    if nombre_base.startswith("ter-v12"):
+        return "small"
+
+    alto_fuente = alto_fuente_terminus(nombre)
+
+    if alto_fuente in (14, 16, 18, 20):
+        return "40" if alto_fuente == 16 else str(alto_fuente)
+
+    return None
+
+
 # ------------------------------------------------------------
 # Entrada para uso integrado
 # ------------------------------------------------------------
@@ -227,6 +647,7 @@ def ejecutar(stdscr, ruta_archivo=None):
 class PicoEdit:
     def __init__(self, stdscr, ruta_archivo=None):
         self.stdscr = stdscr
+        self.teclado = crear_teclado(stdscr)
         self.ruta_archivo = normalizar_ruta(ruta_archivo)
         self.carpeta_actual = os.getcwd()
 
@@ -572,67 +993,79 @@ class PicoEdit:
     # Bucle principal
     # ------------------------------------------------------------
     def bucle(self):
-        curses.curs_set(1)
+        cursor_visible(True)
 
-        while True:
-            self.dibujar()
-            tecla = self.leer_tecla_principal()
-            self.mensaje = ""
+        try:
+            while True:
+                actualizar_tamano(self.stdscr)
+                self.dibujar()
+                tecla = self.leer_tecla_principal()
+                self.mensaje = ""
 
-            if tecla == "menu":
-                accion = self.menu_superior()
+                if tecla == curses.KEY_RESIZE:
+                    actualizar_tamano(self.stdscr)
+                    self.asegurar_cursor_visible()
+                    continue
 
-                if accion == "salir":
-                    break
-            elif tecla == "undo":
-                self.deshacer()
-            elif tecla == "redo":
-                self.rehacer()
-            elif tecla == "copy":
-                self.copiar_linea()
-            elif tecla == "cut":
-                self.cortar_linea()
-            elif tecla == "paste":
-                self.pegar_linea()
-            elif tecla == "duplicate":
-                self.duplicar_linea()
-            elif tecla == "save":
-                self.guardar_archivo()
-            elif tecla == "open":
-                self.abrir_desde_panel()
-            elif tecla == "run":
-                self.ejecutar_programa()
-            elif tecla == "find":
-                self.buscar()
-            elif tecla == "find_next":
-                self.buscar_siguiente()
-            elif tecla == curses.KEY_F1 or tecla == CTRL_G:
-                self.mostrar_ayuda()
-            elif tecla == curses.KEY_F2 or tecla == CTRL_S:
-                self.guardar_archivo()
-            elif tecla == curses.KEY_F3 or tecla == CTRL_F:
-                self.buscar()
-            elif tecla == curses.KEY_F4 or tecla == CTRL_N:
-                self.buscar_siguiente()
-            elif tecla == curses.KEY_F5 or tecla == curses.KEY_IC:
-                self.insertar = not self.insertar
-            elif tecla == curses.KEY_F6 or tecla == CTRL_O:
-                self.abrir_desde_panel()
-            elif tecla == curses.KEY_F7:
-                self.guardar_como()
-            elif tecla == curses.KEY_F8 or tecla == CTRL_R:
-                self.ejecutar_programa()
-            elif tecla == 27:
-                accion = self.menu_superior()
+                if tecla == CTRL_C:
+                    if self.confirmar_salida():
+                        break
+                elif tecla == "menu":
+                    accion = self.menu_superior()
 
-                if accion == "salir":
-                    break
-            else:
-                self.manejar_tecla_edicion(tecla)
+                    if accion == "salir":
+                        break
+                elif tecla == "undo":
+                    self.deshacer()
+                elif tecla == "redo":
+                    self.rehacer()
+                elif tecla == "copy":
+                    self.copiar_linea()
+                elif tecla == "cut":
+                    self.cortar_linea()
+                elif tecla == "paste":
+                    self.pegar_linea()
+                elif tecla == "duplicate":
+                    self.duplicar_linea()
+                elif tecla == "save":
+                    self.guardar_archivo()
+                elif tecla == "open":
+                    self.abrir_desde_panel()
+                elif tecla == "run":
+                    self.ejecutar_programa()
+                elif tecla == "find":
+                    self.buscar()
+                elif tecla == "find_next":
+                    self.buscar_siguiente()
+                elif tecla == curses.KEY_F1 or tecla == CTRL_G:
+                    self.mostrar_ayuda()
+                elif tecla == curses.KEY_F2 or tecla == CTRL_S:
+                    self.guardar_archivo()
+                elif tecla == curses.KEY_F3 or tecla == CTRL_F:
+                    self.buscar()
+                elif tecla == curses.KEY_F4 or tecla == CTRL_N:
+                    self.buscar_siguiente()
+                elif tecla == curses.KEY_F5 or tecla == curses.KEY_IC:
+                    self.insertar = not self.insertar
+                elif tecla == curses.KEY_F6 or tecla == CTRL_O:
+                    self.abrir_desde_panel()
+                elif tecla == curses.KEY_F7:
+                    self.guardar_como()
+                elif tecla == curses.KEY_F8 or tecla == CTRL_R:
+                    self.ejecutar_programa()
+                elif tecla == 27:
+                    accion = self.menu_superior()
 
-        curses.curs_set(0)
-        limpiar_area(self.stdscr)
-        self.stdscr.refresh()
+                    if accion == "salir":
+                        break
+                else:
+                    self.manejar_tecla_edicion(tecla)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            cursor_visible(False)
+            limpiar_area(self.stdscr)
+            self.stdscr.refresh()
 
     # ------------------------------------------------------------
     # Undo / Redo
@@ -720,20 +1153,6 @@ class PicoEdit:
     # Menu superior
     # ------------------------------------------------------------
     def leer_tecla_principal(self):
-        tecla = self.stdscr.getch()
-
-        if tecla != 27:
-            return tecla
-
-        # ALT+letra suele llegar como ESC seguido de una letra.
-        # Esperamos muy poco para distinguirlo de ESC solo.
-        self.stdscr.timeout(ESPERA_ALT_MS)
-
-        try:
-            siguiente = self.stdscr.getch()
-        finally:
-            self.stdscr.timeout(-1)
-
         mapa_alt = {
             TECLA_ALT_MENU: "menu",
             ord("M"): "menu",
@@ -763,10 +1182,15 @@ class PicoEdit:
             ord("N"): "find_next",
         }
 
+        tipo, siguiente = self.teclado.leer_evento()
+
+        if tipo == "tecla":
+            return siguiente
+
         if siguiente in mapa_alt:
             return mapa_alt[siguiente]
 
-        if siguiente != -1:
+        if siguiente is not None:
             curses.ungetch(siguiente)
 
         return 27
@@ -818,6 +1242,7 @@ class PicoEdit:
                 "x": 26,
                 "opciones": [
                     ("Help", self.mostrar_ayuda),
+                    ("Console font", self.seleccionar_fuente_consola),
                     ("About", self.mostrar_acerca_de),
                 ],
             },
@@ -828,18 +1253,23 @@ class PicoEdit:
         menu_sel = 0
         item_sel = 0
 
-        curses.curs_set(0)
+        cursor_visible(False)
 
         while True:
+            actualizar_tamano(self.stdscr)
             self.dibujar()
             self.dibujar_menu_superior(menus, menu_sel, item_sel)
             self.stdscr.refresh()
 
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
-            if tecla == 27:
-                curses.curs_set(1)
+            if tecla in (27, CTRL_C):
+                cursor_visible(True)
                 return None
+
+            if tecla == curses.KEY_RESIZE:
+                actualizar_tamano(self.stdscr)
+                continue
 
             if tecla == curses.KEY_LEFT:
                 menu_sel = (menu_sel - 1) % len(menus)
@@ -864,7 +1294,7 @@ class PicoEdit:
             if tecla in (10, 13, curses.KEY_ENTER):
                 funcion = opciones[item_sel][1]
                 resultado = funcion()
-                curses.curs_set(1)
+                cursor_visible(True)
                 return resultado
 
             if 32 <= tecla <= 126:
@@ -874,7 +1304,7 @@ class PicoEdit:
                     if nombre and nombre[0].lower() == letra:
                         item_sel = i
                         resultado = funcion()
-                        curses.curs_set(1)
+                        cursor_visible(True)
                         return resultado
 
     def dibujar_menu_superior(self, menus, menu_sel, item_sel):
@@ -895,8 +1325,11 @@ class PicoEdit:
         x = menu["x"]
         y = 1
 
+        if ancho > AN:
+            ancho = AN
+
         if x + ancho >= AN:
-            x = AN - ancho - 1
+            x = max(0, AN - ancho)
 
         self.dibujar_ventana(x, y, ancho, alto, menu["titulo"])
 
@@ -969,10 +1402,165 @@ class PicoEdit:
         self.stdscr.refresh()
 
         while True:
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
             if tecla in (27, 10, 13, curses.KEY_ENTER):
                 return None
+
+
+    def seleccionar_fuente_consola(self):
+        cargador = cargador_fuente_consola_disponible()
+
+        if cargador is None:
+            self.mensaje = "setfont/loadfont not found. Install console font tools."
+            return None
+
+        fuentes = listar_fuentes_consola()
+
+        if not fuentes:
+            self.mensaje = "No PSF console fonts found."
+            return None
+
+        seleccion = 0
+        offset = 0
+
+        while True:
+            actualizar_tamano(self.stdscr)
+            ancho = min(max(30, AN - 4), AN)
+            alto = min(max(8, AL - 4), AL)
+            x = max(0, (AN - ancho) // 2)
+            y = max(0, (AL - alto) // 2)
+            alto_lista = max(1, alto - 5)
+
+            seleccion = max(0, min(seleccion, len(fuentes) - 1))
+
+            if seleccion < offset:
+                offset = seleccion
+            elif seleccion >= offset + alto_lista:
+                offset = seleccion - alto_lista + 1
+
+            self.dibujar()
+            self.dibujar_ventana(x, y, ancho, alto, "Console font")
+
+            fin = min(len(fuentes), offset + alto_lista)
+
+            for i in range(offset, fin):
+                fila = y + 2 + (i - offset)
+                nombre = fuentes[i]["nombre"]
+                color = C_VENTANA_SEL if i == seleccion else C_VENTANA
+                self.escribir_en_ventana(x + 2, fila, ancho - 4, nombre, color)
+
+            pie = "ENTER apply  ESC cancel"
+            self.escribir_en_ventana(x + 2, y + alto - 2, ancho - 4, pie, C_VENTANA_ESTADO)
+            self.stdscr.refresh()
+
+            tecla = self.teclado.leer_tecla()
+
+            if tecla in (27, CTRL_C):
+                self.mensaje = "Font selection canceled."
+                return None
+
+            if tecla == curses.KEY_RESIZE:
+                actualizar_tamano(self.stdscr)
+                continue
+
+            if tecla == curses.KEY_UP:
+                seleccion = max(0, seleccion - 1)
+                continue
+
+            if tecla == curses.KEY_DOWN:
+                seleccion = min(len(fuentes) - 1, seleccion + 1)
+                continue
+
+            if tecla == curses.KEY_PPAGE:
+                seleccion = max(0, seleccion - alto_lista)
+                continue
+
+            if tecla == curses.KEY_NPAGE:
+                seleccion = min(len(fuentes) - 1, seleccion + alto_lista)
+                continue
+
+            if tecla in (10, 13, curses.KEY_ENTER):
+                self.aplicar_fuente_consola(fuentes[seleccion])
+                return None
+
+    def aplicar_fuente_consola(self, fuente):
+        curses.def_prog_mode()
+        curses.endwin()
+        cargador = cargador_fuente_consola_disponible()
+
+        try:
+            if cargador is not None and cargador[0] == "picofont":
+                eleccion = eleccion_picofont_para_fuente(fuente["nombre"])
+
+                if eleccion is None:
+                    resultado = subprocess.CompletedProcess(
+                        [cargador[1]],
+                        1,
+                        stdout="",
+                        stderr="picofont supports only Terminus VGA 14/16/18/20"
+                    )
+                else:
+                    resultado = subprocess.run(
+                        [cargador[1], eleccion],
+                        check=False,
+                        capture_output=True,
+                        text=True
+                    )
+            elif cargador is not None and cargador[0] == "setfont":
+                resultado = subprocess.run(
+                    [cargador[1], fuente["ruta"]],
+                    check=False,
+                    capture_output=True,
+                    text=True
+                )
+            elif cargador is not None and cargador[0] == "loadfont":
+                resultado = subprocess.run(
+                    [cargador[1]],
+                    input=leer_bytes_fuente_consola(fuente["ruta"]),
+                    check=False,
+                    capture_output=True
+                )
+            else:
+                resultado = subprocess.CompletedProcess(
+                    ["setfont/loadfont"],
+                    1,
+                    stdout=b"",
+                    stderr=b"setfont/loadfont not found"
+                )
+
+            if resultado.returncode == 0:
+                self.ajustar_tamano_por_fuente(fuente)
+        finally:
+            curses.reset_prog_mode()
+            cursor_visible(True)
+            actualizar_tamano(self.stdscr)
+
+        if resultado.returncode == 0:
+            self.mensaje = f"Font: {fuente['nombre']}"
+            return
+
+        error = (resultado.stderr or resultado.stdout or b"console font load failed")
+
+        if isinstance(error, bytes):
+            error = error.decode("utf-8", "replace")
+
+        error = error.strip()
+        self.mensaje = error.splitlines()[0][:AN] if error else "console font load failed"
+
+    def ajustar_tamano_por_fuente(self, fuente):
+        tamano = tamano_terminal_para_fuente(fuente["nombre"])
+
+        if not tamano:
+            return
+
+        filas, columnas = tamano
+        subprocess.run(
+            ["stty", "rows", str(filas), "cols", str(columnas)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
 
 
     # ------------------------------------------------------------
@@ -1005,8 +1593,6 @@ class PicoEdit:
             self.insertar_texto("    ")
         elif tecla == CTRL_X:
             self.cortar_linea()
-        elif tecla == CTRL_C:
-            self.copiar_linea()
         elif tecla == CTRL_V:
             self.pegar_linea()
         elif tecla == CTRL_D:
@@ -1215,7 +1801,7 @@ class PicoEdit:
             input("Press ENTER to return to PicoEdit...")
         finally:
             curses.reset_prog_mode()
-            curses.curs_set(1)
+            cursor_visible(True)
             self.mensaje = "Execution finished."
             self.stdscr.refresh()
 
@@ -1271,6 +1857,9 @@ class PicoEdit:
     # Ventanas simples con borde ASCII
     # ------------------------------------------------------------
     def dibujar_ventana(self, x, y, ancho, alto, titulo_txt=""):
+        ancho = max(4, min(ancho, AN - max(0, x)))
+        alto = max(3, min(alto, AL - max(0, y)))
+
         borde_sup = "╔" + "═" * (ancho - 2) + "╗"
         borde_inf = "╚" + "═" * (ancho - 2) + "╝"
         borde_med = "║" + " " * (ancho - 2) + "║"
@@ -1376,12 +1965,13 @@ class PicoEdit:
         seleccion = 0
         offset = 0
 
-        ventana_an = AN - 6
-        ventana_al = AL - 4
-        vx = 3
-        vy = 2
-
         while True:
+            actualizar_tamano(self.stdscr)
+            ventana_an = max(18, AN - 6)
+            ventana_al = max(8, AL - 4)
+            vx = min(3, max(0, AN - ventana_an))
+            vy = min(2, max(0, AL - ventana_al))
+
             entradas = self.listar_panel(carpeta)
 
             if not entradas:
@@ -1423,9 +2013,9 @@ class PicoEdit:
             self.escribir_en_ventana(vx + 2, vy + ventana_al - 2, ventana_an - 4, pie, C_VENTANA_ESTADO)
 
             self.stdscr.refresh()
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
-            if tecla == 27:
+            if tecla in (27, CTRL_C):
                 return None
 
             if tecla == curses.KEY_UP:
@@ -1454,9 +2044,10 @@ class PicoEdit:
         pos = len(texto)
         offset = 0
 
-        curses.curs_set(1)
+        cursor_visible(True)
 
         while True:
+            actualizar_tamano(self.stdscr)
             ancho_input = max(1, AN - len(prompt))
 
             if pos < offset:
@@ -1486,7 +2077,7 @@ class PicoEdit:
                 pass
 
             self.stdscr.refresh()
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
             if tecla in (10, 13, curses.KEY_ENTER):
                 return "".join(texto)
@@ -1548,10 +2139,13 @@ class PicoEdit:
             "  ALT+F        find",
             "  ALT+N        find next",
             "  ALT+R        run file",
+            "",
+            "Help",
+            "  Console font changes Linux console font",
         ]
 
-        ancho = 47
-        alto = 21
+        ancho = min(47, max(24, AN - 4))
+        alto = min(21, max(8, AL - 4))
         x = (AN - ancho) // 2
         y = (AL - alto) // 2
 
@@ -1574,9 +2168,9 @@ class PicoEdit:
         self.stdscr.refresh()
 
         while True:
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
-            if tecla in (27, 10, 13, curses.KEY_ENTER):
+            if tecla in (27, CTRL_C, 10, 13, curses.KEY_ENTER):
                 return None
 
 
@@ -1586,12 +2180,12 @@ class PicoEdit:
         self.stdscr.refresh()
 
         while True:
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
             if tecla in (ord("y"), ord("Y")):
                 return True
 
-            if tecla in (ord("n"), ord("N"), 27):
+            if tecla in (ord("n"), ord("N"), 27, CTRL_C):
                 return False
 
     def confirmar_tres_opciones(self, mensaje):
@@ -1600,7 +2194,7 @@ class PicoEdit:
         self.stdscr.refresh()
 
         while True:
-            tecla = self.stdscr.getch()
+            tecla = self.teclado.leer_tecla()
 
             if tecla in (ord("y"), ord("Y")):
                 return "y"
@@ -1608,7 +2202,7 @@ class PicoEdit:
             if tecla in (ord("n"), ord("N")):
                 return "n"
 
-            if tecla == 27:
+            if tecla in (27, CTRL_C):
                 return "esc"
 
     def confirmar_salida(self):
@@ -1630,6 +2224,8 @@ class PicoEdit:
 
 
 def main(stdscr):
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
     if len(sys.argv) >= 2:
         ruta = sys.argv[1]
     else:
@@ -1639,4 +2235,8 @@ def main(stdscr):
 
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    try:
+        preparar_terminal_consola()
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        pass

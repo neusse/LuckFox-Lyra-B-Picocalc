@@ -22,6 +22,8 @@ The editor is designed to work well on interfaces of approximately **53 columns 
 ## Main features
 
 * Plain-text editor focused on Python code.
+* Adjusts the edit area to the real terminal size.
+* Uses the full screen over both SSH and the physical console.
 * Syntax highlighting for Python.
 * Recognition of keywords, functions, strings, numbers, and comments.
 * Simple top menu with `File`, `Edit`, `Search`, `Run`, and `Help` sections.
@@ -33,6 +35,8 @@ The editor is designed to work well on interfaces of approximately **53 columns 
 * Direct execution of the current Python script from inside the editor.
 * Basic automatic indentation for Python blocks.
 * Bottom status bar with current cursor position and editing mode.
+* More tolerant handling for Linux console special keys.
+* Optional console font picker when `picofont`, `setfont`, or `loadfont` is available.
 * Fully English user interface.
 * Implemented as a single file: `picoedit.py`.
 * No external dependencies beyond standard Python and `curses`.
@@ -64,6 +68,21 @@ python3 picoedit.py my_script.py
 ```
 
 If the file exists, it is loaded into the editor. If it does not exist, it can be created and saved from PicoEdit.
+
+---
+
+## Note about this version
+
+This version was tested on a **Clockwork Pi PicoCalc with Luckfox Lyra and Linux**.
+In that environment it uses the full available terminal size over SSH and on
+the physical PicoCalc console.
+
+It also includes special handling for some Linux console key sequences and an
+option to change console fonts. Those parts may depend on the system, keyboard,
+`TERM`, `curses`, and tools such as `picofont`, `setfont`, or `loadfont`.
+
+Before applying these changes to other environments, please review those
+assumptions carefully.
 
 ---
 
